@@ -10,6 +10,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { ownersAmount } from "./amount.js";
 
 type Block = { text: string } | { toolUse: { toolUseId: string; name: string; input: Record<string, unknown> } } | { toolResult: { toolUseId: string; status: "success" | "error"; content: { json: unknown }[] } };
 type Message = { role: "user" | "assistant"; content: Block[] };
@@ -198,6 +199,11 @@ async function ask(text: string, mode: "ask" | "review" = "ask") {
         addTurn("analyst", reply.text, `${used.length ? `tools: ${used.join(", ")} · ` : ""}${reply.brain}`);
         speak(reply.text);
         return;
+      }
+      if (reply.toolUse.name === "record_rent_payment") {
+        // Keep the conversation and the call in step: both carry only an amount the owner actually said.
+        reply.toolUse.input = ownersAmount(reply.toolUse.input, text);
+        for (const blk of reply.message.content) if ("toolUse" in blk && blk.toolUse.toolUseId === reply.toolUse.toolUseId) blk.toolUse.input = reply.toolUse.input;
       }
       if (needsApproval(reply.toolUse.name) && !(await approve(reply.toolUse.name, reply.toolUse.input))) {
         used.push(`${reply.toolUse.name} declined`);

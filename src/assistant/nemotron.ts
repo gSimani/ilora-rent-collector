@@ -25,7 +25,7 @@ Write plain text only: no markdown, no asterisks, no headings. A numbered list i
 State only what a tool returned. Never guess a cause, a likelihood or a next step the tool did not give.
 If the answer is already in an earlier tool result, answer from it without calling another tool.
 Rent collection: when the owner asks what they can bill or collect, call draft_rent_invoices; it covers every property, so name each tenant's property in the answer. When the owner asks to bill a tenant, call send_rent_invoice with that tenant's name right away; to bill everyone, send one tenant at a time. The page asks the owner to approve before the tool runs, so a result from send_rent_invoice or record_rent_payment means the owner already approved and it is done: say it was sent or recorded, never ask for approval.
-When the owner says a tenant paid, call record_rent_payment for that tenant's bill. For who still owes, call rent_collection_status.
+When the owner says a tenant paid, call record_rent_payment for that tenant's bill; pass amount only if the owner said a dollar figure, never a number of your own. For who still owes, call rent_collection_status.
 Never read out a link, an invoice number or an email address; the screen shows them. Never say an invoice was sent or a payment recorded unless the tool returned it. If a result says the owner did not approve, say nothing was sent and stop.`;
 
 const REVIEW = `This is a portfolio review. Call one tool at a time: list the properties, then for every property take the snapshot, check the rent roll against the statement, and list leases ending within 3 months.
@@ -85,6 +85,44 @@ export function pickNemotron(ids: string[], prefer: string[]): string | undefine
   return nem.sort().reverse()[0];
 }
 
+/** Tools that change something in PayPal. */
+const WRITES = new Set(["send_rent_invoice", "record_rent_payment"]);
+
+const lastOwnerText = (messages: Message[]) => {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const t = messages[i].content.find((b): b is { text: string } => "text" in b);
+    if (messages[i].role === "user" && t) return { index: i, text: t.text };
+  }
+  return { index: -1, text: "" };
+};
+
+/**
+ * True when the owner asked to bill or record money, the reply says it was done,
+ * and no write tool actually ran since the owner's message. Nemotron 3 Nano was
+ * measured answering "Recorded payment" without calling the tool.
+ */
+export function unbackedWriteClaim(messages: Message[], reply: string): boolean {
+  const owner = lastOwnerText(messages);
+  if (!/\b(bill|invoice|send|paid|payment|received|check|cash|transfer)\b/i.test(owner.text)) return false;
+  if (!/\b(recorded|sent|marked|billed|invoiced)\b/i.test(reply)) return false;
+  if (/\b(nothing|not|no|never|didn't|did not|wasn't|hasn't|haven't)\b[^.]{0,40}\b(recorded|sent|marked|billed|invoiced)\b/i.test(reply)) return false;
+  const ran = messages.slice(owner.index + 1).some((m) => m.content.some((b) => "toolUse" in b && WRITES.has(b.toolUse.name)));
+  return !ran;
+}
+
+/** Which write the owner's message asks for, if any. Used only to name the tool on a retry. */
+export function writeIntent(ownerText: string): "send_rent_invoice" | "record_rent_payment" | undefined {
+  if (/\b(paid|payment|received|check|cash|transfer)\b/i.test(ownerText)) return "record_rent_payment";
+  if (/\b(bill|invoice|send)\b/i.test(ownerText) && !/\b(what|which|how much|can i)\b/i.test(ownerText)) return "send_rent_invoice";
+  return undefined;
+}
+
+/** A reply that spells a tool call out as text instead of making it. */
+const toolNameInText = (text: string) => [...WRITES].some((n) => text.includes(n));
+
+const NOT_DONE = "I haven't recorded or sent anything yet. Ask me again and the approval card will come up.";
+const CORRECTION = "Your reply says something was sent or recorded, but no tool ran, so nothing happened. Call the right tool now (send_rent_invoice or record_rent_payment), or say plainly that nothing was done.";
+
 export class NemotronBrain implements Brain {
   name = "nemotron";
   constructor(private key = process.env.NEBIUS_API_KEY ?? "") {
@@ -94,7 +132,7 @@ export class NemotronBrain implements Brain {
   private async model(kind: "fast" | "main"): Promise<string> {
     const pinned = kind === "fast" ? process.env.NEMOTRON_FAST_MODEL : process.env.NEMOTRON_MODEL;
     if (pinned) return pinned;
-    const ids = (await listModels(this.key)).filter((id) => !/-VL/i.test(id)); // vision models are not needed here
+    const ids = (await listModels(this.key)).filter((id) => !/-VL\b/i.test(id)); // vision models are not needed here
     const preferred = kind === "fast" ? "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B" : "nvidia/nemotron-3-super-120b-a12b";
     const id = ids.includes(preferred) ? preferred : kind === "fast" ? pickNemotron(ids, ["nano", "super"]) : pickNemotron(ids, ["super", "ultra", "nano"]);
     if (!id) throw new Error("No Nemotron model is listed for this Token Factory key.");
@@ -104,14 +142,31 @@ export class NemotronBrain implements Brain {
   async next({ messages, tools, mode }: BrainRequest) {
     const model = await this.model(mode === "review" ? "main" : "fast");
     this.name = `nemotron:${model}`;
+    const chat: unknown[] = toChat(messages, mode);
+    let out = await this.complete(model, chat, tools, mode);
+    const failed = (o: typeof out) => o.stop === "end_turn" && (unbackedWriteClaim(messages, o.text) || toolNameInText(o.text));
+    if (failed(out)) {
+      // One retry with the correction. Nemotron 3 Nano was measured answering "Recorded payment" without a call,
+      // then spelling the call out as text, so the retry names the tool the owner's message asks for.
+      const intent = writeIntent(lastOwnerText(messages).text);
+      chat.push({ role: "assistant", content: out.text }, { role: "user", content: CORRECTION });
+      out = await this.complete(model, chat, tools, mode, intent && tools.some((t) => t.name === intent) ? intent : undefined);
+      if (failed(out)) {
+        out = { stop: "end_turn" as const, message: { role: "assistant", content: [{ text: NOT_DONE } as Block] }, text: NOT_DONE };
+      }
+    }
+    return out;
+  }
+
+  private async complete(model: string, chat: unknown[], tools: BrainRequest["tools"], mode: BrainRequest["mode"], force?: string) {
     const res = await fetch(`${BASE}/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model,
-        messages: toChat(messages, mode),
+        messages: chat,
         tools: tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description ?? t.name, parameters: t.inputSchema ?? { type: "object", properties: {} } } })),
-        tool_choice: "auto",
+        tool_choice: force ? { type: "function", function: { name: force } } : "auto",
         temperature: 0,
         // Questions skip the reasoning pass, so answers come back in about a second.
         // The review keeps it: planning eight checks and ranking the findings is where it pays off.

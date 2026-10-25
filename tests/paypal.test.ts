@@ -9,6 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { collectibleBills, findBill, invoiceBody, PayPal } from "../src/paypal.js";
 import { createServer } from "../src/server.js";
+import { ownersAmount } from "../simulator/src/amount.js";
 import { errorOf, sc } from "./helpers.js";
 
 type Inv = { id: string; status: string; reference: string; amount: number; paid: number; payments: { payment_id: string; type: string }[] };
@@ -130,7 +131,7 @@ describe("the PayPal tools over MCP", () => {
     expect(again.already_sent).toBe(true);
     expect(store.size).toBe(1); // never billed twice
 
-    const part = sc(await client.callTool({ name: "record_rent_payment", arguments: { flag_id: id, amount: 4000 } }));
+    const part = sc(await client.callTool({ name: "record_rent_payment", arguments: { flag_id: id, amount: 4000, method: "check" } }));
     expect(part.invoice).toMatchObject({ status: "PARTIALLY_PAID", paid: 4000, due: 5000 });
 
     const status = sc(await client.callTool({ name: "rent_collection_status", arguments: {} }));
@@ -213,5 +214,15 @@ describe("a rent collection conversation with the offline brain", () => {
     expect(await say("Harbor Light Pilates paid by check.")).toBe("Recorded $9,000 from Harbor Light Pilates. The invoice is paid in full.");
     expect(await say("Who still owes me?")).toBe("You have billed $9,000 and collected $9,000, so $0 is still due. $5,190 has not been invoiced yet.");
     expect(approvals).toEqual(["send_rent_invoice", "record_rent_payment"]);
+  });
+});
+
+describe("payment amounts come from the owner, never the model", () => {
+  it("drops an amount the owner did not say, so the full amount due is recorded", () => {
+    expect(ownersAmount({ flag_id: "Harbor Light Pilates", amount: 1000 }, "Harbor Light Pilates paid by check.")).toEqual({ flag_id: "Harbor Light Pilates" });
+  });
+  it("keeps an amount the owner said, with or without a comma or a dollar sign", () => {
+    expect(ownersAmount({ flag_id: "x", amount: 4000 }, "They paid $4,000 by check.")).toEqual({ flag_id: "x", amount: 4000 });
+    expect(ownersAmount({ flag_id: "x", amount: 4000 }, "paid 4000")).toEqual({ flag_id: "x", amount: 4000 });
   });
 });
