@@ -381,7 +381,7 @@ export function createServer(paypal: PayPal = sharedPayPal()): McpServer {
       if (!paypal.configured) return fail("paypal_not_connected", "PayPal is not connected on this server, so no invoice was sent.");
       try {
         const { already_sent, ...inv } = await paypal.send(bill);
-        return ok({ flag_id, tenant: bill.tenant, property_name: bill.property_name, unit: bill.unit, already_sent, invoice: strip(inv), note: `${DATA_NOTE} PayPal sandbox.` });
+        return ok({ flag_id, tenant: bill.tenant, property_name: bill.property_name, unit: bill.unit, already_sent, invoice: strip(inv), note: already_sent ? `Already sent earlier; not sent again. ${DATA_NOTE}` : `Sent to the tenant after the owner approved. Due in 10 days. ${DATA_NOTE} PayPal sandbox.` });
       } catch (err) {
         return payPalFailure(err);
       }
@@ -443,7 +443,7 @@ export function createServer(paypal: PayPal = sharedPayPal()): McpServer {
         if (inv.due <= 0) return fail("already_paid", `${bill.tenant}'s invoice is already paid in full.`, { invoice: strip(inv) });
         const pay = Math.min(amount ?? inv.due, inv.due);
         const after = (await paypal.recordPayment(inv.invoice_id, pay, method ?? "CHECK")) ?? inv;
-        return ok({ flag_id, tenant: bill.tenant, recorded: pay, invoice: strip(after), note: `${DATA_NOTE} PayPal sandbox.` });
+        return ok({ flag_id, tenant: bill.tenant, recorded: pay, invoice: strip(after), note: `Recorded after the owner approved. ${DATA_NOTE} PayPal sandbox.` });
       } catch (err) {
         return payPalFailure(err);
       }
