@@ -63,8 +63,19 @@ export function collectibleBills(propertyId?: string): Bill[] {
   return out.sort((a, b) => b.amount - a.amount);
 }
 
-export function findBill(flagId: string) {
-  return collectibleBills().find((b) => b.flag_id === flagId);
+/** A bill by its flag id, or by what the owner calls it: the tenant's name, or the suite or unit. */
+export function findBill(query: string) {
+  const bills = collectibleBills();
+  const exact = bills.find((b) => b.flag_id === query);
+  if (exact) return exact;
+  const q = query.toLowerCase().replace(/[^a-z0-9 -]/g, " ").trim();
+  if (!q) return undefined;
+  const hits = bills.filter((b) => {
+    const tenant = b.tenant.toLowerCase();
+    const unit = b.unit.toLowerCase().split(" ").pop()!;
+    return tenant.includes(q) || q.includes(tenant) || q.includes(tenant.split(" ")[0]) || q.split(" ").includes(unit);
+  });
+  return hits.length === 1 ? hits[0] : undefined;
 }
 
 /** The invoice body PayPal receives. Exported so tests can assert it without a network. */

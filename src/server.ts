@@ -366,8 +366,8 @@ export function createServer(paypal: PayPal = sharedPayPal()): McpServer {
     {
       title: "Send rent invoice",
       description:
-        "Call only after the owner asks to bill a specific amount from draft_rent_invoices. Creates a PayPal invoice for that tenant and sends it. The page asks the owner to approve before this runs. Calling it again for the same amount returns the invoice already sent; it never bills a tenant twice.",
-      inputSchema: { flag_id: z.string().min(1).describe("flag_id of a bill from draft_rent_invoices") },
+        "Call when the owner asks to bill a tenant; pass the flag_id from draft_rent_invoices or simply the tenant's name. Creates a PayPal invoice for that tenant and sends it. The page asks the owner to approve before this runs. Calling it again for the same amount returns the invoice already sent; it never bills a tenant twice.",
+      inputSchema: { flag_id: z.string().min(1).describe("flag_id of a bill from draft_rent_invoices, or the tenant's name, e.g. 'Harbor Light Pilates'") },
       outputSchema: { flag_id: z.string(), tenant: z.string(), property_name: z.string(), unit: z.string(), already_sent: z.boolean(), invoice: invoiceShape, note: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -381,7 +381,7 @@ export function createServer(paypal: PayPal = sharedPayPal()): McpServer {
       if (!paypal.configured) return fail("paypal_not_connected", "PayPal is not connected on this server, so no invoice was sent.");
       try {
         const { already_sent, ...inv } = await paypal.send(bill);
-        return ok({ flag_id, tenant: bill.tenant, property_name: bill.property_name, unit: bill.unit, already_sent, invoice: strip(inv), note: already_sent ? `Already sent earlier; not sent again. ${DATA_NOTE}` : `Sent to the tenant after the owner approved. Due in 10 days. ${DATA_NOTE} PayPal sandbox.` });
+        return ok({ flag_id: bill.flag_id, tenant: bill.tenant, property_name: bill.property_name, unit: bill.unit, already_sent, invoice: strip(inv), note: already_sent ? `Already sent earlier; not sent again. ${DATA_NOTE}` : `Sent to the tenant after the owner approved. Due in 10 days. ${DATA_NOTE} PayPal sandbox.` });
       } catch (err) {
         return payPalFailure(err);
       }
@@ -426,7 +426,7 @@ export function createServer(paypal: PayPal = sharedPayPal()): McpServer {
       description:
         "Call when the owner says a tenant paid an invoiced amount outside PayPal, for example by check. Marks the PayPal invoice paid for that amount. The page asks the owner to approve before this runs.",
       inputSchema: {
-        flag_id: z.string().min(1).describe("flag_id of a bill that has a sent invoice"),
+        flag_id: z.string().min(1).describe("flag_id of a bill that has a sent invoice, or the tenant's name"),
         amount: z.number().positive().optional().describe("Dollars received; defaults to the full amount due"),
         method: z.enum(["CHECK", "BANK_TRANSFER", "CASH"]).optional().describe("How the tenant paid; defaults to CHECK"),
       },
@@ -438,12 +438,12 @@ export function createServer(paypal: PayPal = sharedPayPal()): McpServer {
       if (!bill) return fail("unknown_bill", `Nothing was billed for "${flag_id}".`);
       if (!paypal.configured) return fail("paypal_not_connected", "PayPal is not connected on this server, so no payment was recorded.");
       try {
-        const inv = await paypal.invoiceFor(flag_id);
+        const inv = await paypal.invoiceFor(bill.flag_id);
         if (!inv) return fail("not_invoiced", `${bill.tenant} has not been sent an invoice for this amount yet. Send it first.`);
         if (inv.due <= 0) return fail("already_paid", `${bill.tenant}'s invoice is already paid in full.`, { invoice: strip(inv) });
         const pay = Math.min(amount ?? inv.due, inv.due);
         const after = (await paypal.recordPayment(inv.invoice_id, pay, method ?? "CHECK")) ?? inv;
-        return ok({ flag_id, tenant: bill.tenant, recorded: pay, invoice: strip(after), note: `Recorded after the owner approved. ${DATA_NOTE} PayPal sandbox.` });
+        return ok({ flag_id: bill.flag_id, tenant: bill.tenant, recorded: pay, invoice: strip(after), note: `Recorded after the owner approved. ${DATA_NOTE} PayPal sandbox.` });
       } catch (err) {
         return payPalFailure(err);
       }
