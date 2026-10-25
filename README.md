@@ -12,6 +12,9 @@
 > **They paid by check.** *(Approve and record.)*
 > Recorded $9,000. The invoice is paid in full. $5,190 has not been invoiced yet.
 
+**Try it:** https://2m5wlrpse7djvpwbm7zwjjq2ei0osvhc.lambda-url.us-east-1.on.aws/ (press "Find rent to collect")  
+**Video (2:21):** https://youtu.be/PWNbD-QoGq0
+
 **Read this first, plainly:**
 - **Nothing reaches PayPal without the owner's click.** The two tools that change anything (send an invoice, record a payment) are marked as writes in MCP, and the page shows an approval card before either runs. Sending the same bill twice returns the first invoice instead of billing the tenant again.
 - **The model never produces a number.** NVIDIA Nemotron decides which tool to call and writes the words. Every amount comes from a deterministic check over the documents, and the tests assert each one to the dollar.
