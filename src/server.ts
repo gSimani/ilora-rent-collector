@@ -427,8 +427,11 @@ export function createServer(paypal: PayPal = sharedPayPal()): McpServer {
         "Call when the owner says a tenant paid an invoiced amount outside PayPal, for example by check. Marks the PayPal invoice paid for that amount. The page asks the owner to approve before this runs.",
       inputSchema: {
         flag_id: z.string().min(1).describe("flag_id of a bill that has a sent invoice, or the tenant's name"),
-        amount: z.number().positive().optional().describe("Dollars received; defaults to the full amount due"),
-        method: z.enum(["CHECK", "BANK_TRANSFER", "CASH"]).optional().describe("How the tenant paid; defaults to CHECK"),
+        amount: z.number().positive().optional().describe("Dollars received, only if the owner said a dollar figure. Otherwise leave it out and the full amount due is recorded."),
+        method: z
+          .preprocess((v) => (typeof v === "string" ? v.trim().toUpperCase().replace(/[\s-]+/g, "_") : v), z.enum(["CHECK", "BANK_TRANSFER", "CASH"]))
+          .optional()
+          .describe("How the tenant paid: CHECK, BANK_TRANSFER or CASH; defaults to CHECK"),
       },
       outputSchema: { flag_id: z.string(), tenant: z.string(), recorded: z.number(), invoice: invoiceShape, note: z.string() },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },

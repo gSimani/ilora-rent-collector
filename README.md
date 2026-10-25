@@ -74,6 +74,8 @@ flowchart LR
 4. If the tool would change something outside the page (send an invoice, record a payment), the page shows what it will do and waits for the owner's click. Declining sends Nemotron an "owner declined" result and nothing reaches PayPal.
 5. When Nemotron has what it needs, it writes the answer. The right-hand panel keeps a running ledger: what is owed, what was billed, what came in.
 
+**A claim needs a call behind it.** While recording the demo, Nemotron 3 Nano once answered "Recorded payment" without calling any tool, and once invented a $1,000 payment the owner never mentioned. Two guards now stop both: an answer that says money was sent or recorded, with no write tool run since the owner spoke, gets one retry that names the tool the owner asked for (and if it still claims without acting, the owner is told nothing was done); and a payment amount is kept only if the owner said that figure. The code is in [src/assistant/nemotron.ts](src/assistant/nemotron.ts) and [simulator/src/amount.ts](simulator/src/amount.ts).
+
 **PayPal is the record.** Each invoice carries the check's id in its reference field, so the server keeps no state of its own. Status, totals and the "already sent" guard are all read back from PayPal. The code is in [src/paypal.ts](src/paypal.ts).
 
 **Two Nemotron sizes.** Ordinary questions go to the newest Nemotron Nano listed for the key, so answers stay quick and cheap. The portfolio review goes to the newest Nemotron Super, which plans the full sequence of checks and writes the memo. Both are picked from `GET /v1/models` at startup and can be pinned with `NEMOTRON_FAST_MODEL` and `NEMOTRON_MODEL`. The code is in [src/assistant/nemotron.ts](src/assistant/nemotron.ts).
@@ -137,9 +139,10 @@ This project builds on our ILORA.ai MCP server for property checks, written Octo
 
 - **PayPal Invoicing v2**: four new MCP tools that draft, send and track rent invoices, and record payments received by check, cash or transfer.
 - **Owner approval before every write**: the tools that touch PayPal are annotated as writes, and the page shows an approval card before either runs.
+- **No claims without a call, no invented amounts**: guards measured against real Nemotron output, described above.
 - **No double billing**: each invoice carries the check's id, and sending again returns the invoice already sent.
 - **A live collection ledger** on the page: owed, billed, collected and still due, with the tenant's PayPal invoice link.
-- **10 new tests** against an in-memory copy of the PayPal endpoints, plus one recorded sandbox round trip.
+- **17 new tests** against an in-memory copy of the PayPal endpoints, plus one recorded sandbox round trip.
 
 ## License
 

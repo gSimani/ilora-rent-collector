@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { pickNemotron, toChat } from "../src/assistant/nemotron.js";
+import { vi } from "vitest";
+import { NemotronBrain, pickNemotron, toChat, unbackedWriteClaim, writeIntent } from "../src/assistant/nemotron.js";
 import type { Message } from "../src/assistant/types.js";
 
 describe("Nemotron brain wiring", () => {
@@ -63,5 +64,52 @@ describe("portfolio review", () => {
     } finally {
       await srv.close();
     }
+  });
+});
+
+describe("a claim that money moved needs a tool call behind it", () => {
+  const owner = (text: string): Message[] => [{ role: "user", content: [{ text }] }];
+  const reply = (content: string | null, tool?: string) => ({
+    ok: true,
+    json: async () => ({ choices: [{ finish_reason: "stop", message: { content, tool_calls: tool ? [{ id: "c1", type: "function", function: { name: tool, arguments: '{"flag_id":"Harbor Light Pilates"}' } }] : undefined } }] }),
+  });
+
+  it("flags 'recorded' with no write tool, but not a refusal, a status answer or a real call", () => {
+    expect(unbackedWriteClaim(owner("Harbor Light Pilates paid by check."), "Recorded payment for Harbor Light Pilates.")).toBe(true);
+    expect(unbackedWriteClaim(owner("Harbor Light Pilates paid by check."), "Okay, nothing was recorded.")).toBe(false);
+    expect(unbackedWriteClaim(owner("Who still owes me?"), "An invoice was sent to Harbor Light Pilates.")).toBe(false);
+    const ran: Message[] = [
+      ...owner("Bill Harbor Light Pilates."),
+      { role: "assistant", content: [{ toolUse: { toolUseId: "c1", name: "send_rent_invoice", input: {} } }] },
+      { role: "user", content: [{ toolResult: { toolUseId: "c1", status: "success", content: [{ json: {} }] } }] },
+    ];
+    expect(unbackedWriteClaim(ran, "Sent the $9,000 invoice.")).toBe(false);
+  });
+
+  it("reads which write the owner asked for, and not a question about what to bill", () => {
+    expect(writeIntent("Harbor Light Pilates paid by check.")).toBe("record_rent_payment");
+    expect(writeIntent("Bill Harbor Light Pilates for the rent increase.")).toBe("send_rent_invoice");
+    expect(writeIntent("What rent can I bill right now?")).toBeUndefined();
+  });
+
+  it("retries once, naming the tool, when the model claims or spells out a call instead of making it", async () => {
+    process.env.NEMOTRON_FAST_MODEL = "nvidia/test-nano";
+    for (const first of ["Recorded payment for Harbor Light Pilates.", 'record_rent_payment with flag_id "Harbor Light Pilates"']) {
+      const fetch = vi.fn().mockResolvedValueOnce(reply(first)).mockResolvedValueOnce(reply(null, "record_rent_payment"));
+      vi.stubGlobal("fetch", fetch);
+      const tools = [{ name: "record_rent_payment", inputSchema: {} }];
+      const out = await new NemotronBrain("k").next({ messages: owner("Harbor Light Pilates paid by check."), tools });
+      expect(out.stop).toBe("tool_use");
+      expect(JSON.parse(fetch.mock.calls[1][1].body).tool_choice).toEqual({ type: "function", function: { name: "record_rent_payment" } });
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("says nothing was done when the model claims it twice without acting", async () => {
+    process.env.NEMOTRON_FAST_MODEL = "nvidia/test-nano";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply("Recorded payment for Harbor Light Pilates.")));
+    const out = await new NemotronBrain("k").next({ messages: owner("Harbor Light Pilates paid by check."), tools: [] });
+    expect(out).toMatchObject({ stop: "end_turn", text: expect.stringMatching(/^I haven't recorded or sent anything/) });
+    vi.unstubAllGlobals();
   });
 });
