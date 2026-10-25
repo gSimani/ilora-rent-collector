@@ -23,7 +23,10 @@ When the owner says "the first one" or "the second one", it means that position 
 Never show ids, JSON, tool names or account codes. If asked, say briefly that the data is a fictional demo portfolio.
 Write plain text only: no markdown, no asterisks, no headings. A numbered list is fine when there are several items.
 State only what a tool returned. Never guess a cause, a likelihood or a next step the tool did not give.
-If the answer is already in an earlier tool result, answer from it without calling another tool.`;
+If the answer is already in an earlier tool result, answer from it without calling another tool.
+Rent collection: when the owner asks what they can bill or collect, call draft_rent_invoices; it covers every property, so name each tenant's property in the answer. Send an invoice with send_rent_invoice only when the owner asks to bill a specific tenant, or says to bill everyone, and then one tenant at a time. The owner approves each one on screen.
+When the owner says a tenant paid, call record_rent_payment for that tenant's bill. For who still owes, call rent_collection_status.
+Never read out a link, an invoice number or an email address; the screen shows them. Never say an invoice was sent or a payment recorded unless the tool returned it. If a result says the owner did not approve, say nothing was sent and stop.`;
 
 const REVIEW = `This is a portfolio review. Call one tool at a time: list the properties, then for every property take the snapshot, check the rent roll against the statement, and list leases ending within 3 months.
 When every check has run, write the owner's memo in two parts. First \"Money to collect\": the total, then one numbered line per reconciliation cause, largest first, each with the property, the amount and the cause. Then \"Leases to renew\": one line per property with leases ending, with the count and annual rent. End with how many properties reconcile with no gap.`;

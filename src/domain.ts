@@ -119,7 +119,7 @@ export function scheduledRent(d: PropertyData, r: RentRollLine, ym: string): num
 
 const isRental = (d: PropertyData, l: StatementLine) => d.property.rental_account_codes.includes(l.account_code);
 const isCamReconciliation = (l: StatementLine) => /cam\s+reconciliation/i.test(l.memo);
-const unitWord = (d: PropertyData) => (d.property.units_label === "suites" ? "Suite" : "Unit");
+export const unitWord = (d: PropertyData) => (d.property.units_label === "suites" ? "Suite" : "Unit");
 const stmtRef = (l: StatementLine): SourceRef => ({
   document: l.source_document,
   page: l.source_page,

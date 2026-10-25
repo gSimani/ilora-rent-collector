@@ -18,6 +18,7 @@ import {
   snapshot,
 } from "./domain.js";
 import { registerUiResources, UI } from "./ui.js";
+import { collectibleBills, findBill, PayPal, PayPalError, type Bill, type InvoiceStatus } from "./paypal.js";
 
 export const SERVER_INFO = { name: "ilora-building-analyst", title: "ILORA.ai property checks", version: "0.1.0" };
 
@@ -59,11 +60,56 @@ function unknownProperty(query: string, candidates: { property_id: string; name:
 
 // ------------------------------------------------------------------ server
 
-export function createServer(): McpServer {
+const invoiceShape = z.object({
+  status: z.string().describe("PayPal invoice status, e.g. SENT, PAID, MARKED_AS_PAID, PARTIALLY_PAID"),
+  amount: z.number(),
+  paid: z.number(),
+  due: z.number(),
+  invoice_date: z.string().optional(),
+  tenant_link: z.string().optional().describe("The page where the tenant pays"),
+});
+
+const billShape = z.object({
+  flag_id: z.string(),
+  property_id: z.string(),
+  property_name: z.string(),
+  unit: z.string(),
+  tenant: z.string(),
+  tenant_email: z.string(),
+  amount: z.number(),
+  months: z.array(z.string()),
+  line_item: z.string(),
+  reason: z.string(),
+  invoice: invoiceShape.nullable().describe("The PayPal invoice for this amount, or null if none was sent"),
+});
+
+/** The model never sees PayPal's invoice number, so it cannot read one aloud; the screen shows the tenant link instead. */
+const strip = ({ flag_id: _f, invoice_id: _i, ...rest }: InvoiceStatus) => rest;
+
+function payPalFailure(err: unknown): CallToolResult {
+  if (err instanceof PayPalError) return fail("paypal_error", `PayPal did not accept the request: ${err.issue}`, { http_status: err.status });
+  return fail("paypal_unreachable", `PayPal could not be reached: ${(err as Error).message}`);
+}
+
+/** Bills for one property (or all), each joined to its live PayPal invoice. */
+async function billsWithInvoices(pp: PayPal, propertyId?: string) {
+  const live = pp.configured ? (await pp.invoices()).filter((i) => i.status !== "CANCELLED") : [];
+  return collectibleBills(propertyId).map((b: Bill) => {
+    const inv = live.find((i) => i.flag_id === b.flag_id);
+    return { ...b, invoice: inv ? strip(inv) : null };
+  });
+}
+
+
+let shared: PayPal | undefined;
+/** One client per process, so its access token is reused across stateless requests. */
+const sharedPayPal = () => (shared ??= new PayPal());
+
+export function createServer(paypal: PayPal = sharedPayPal()): McpServer {
   const server = new McpServer(SERVER_INFO, {
     capabilities: { tools: {}, resources: {} },
     instructions:
-      "Answers questions about a commercial property's rent roll, operating statement and lease expirations, and explains any figure that does not reconcile, with the source page and line. All money is US dollars. The data is a fictional demo portfolio.",
+      "Answers questions about a commercial property's rent roll, operating statement and lease expirations, explains any figure that does not reconcile with the source page and line, and bills the rent tenants owe through PayPal invoices once the owner approves. All money is US dollars. The data is a fictional demo portfolio; PayPal runs in sandbox.",
   });
 
   registerUiResources(server);
@@ -290,6 +336,120 @@ export function createServer(): McpServer {
       });
     },
   );
+
+  // 6. draft_rent_invoices
+  server.registerTool(
+    "draft_rent_invoices",
+    {
+      title: "Draft rent invoices",
+      description:
+        "Call when the owner asks what rent they can bill or collect, or wants invoices prepared. Returns every amount a tenant owes from the rent roll check, largest first, with the invoice line it would carry and whether a PayPal invoice was already sent. Covers every property in the portfolio. Sends nothing. A CAM charge posted to the wrong account is a bookkeeping fix and is not included.",
+      inputSchema: {},
+      outputSchema: { bills: z.array(billShape), total_owed: z.number(), not_yet_invoiced: z.number(), paypal_connected: z.boolean(), note: z.string() },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async () => {
+      try {
+        const bills = await billsWithInvoices(paypal);
+        const total = bills.reduce((a, b) => a + b.amount, 0);
+        const open = bills.filter((b) => !b.invoice).reduce((a, b) => a + b.amount, 0);
+        return ok({ bills, total_owed: total, not_yet_invoiced: open, paypal_connected: paypal.configured, note: DATA_NOTE });
+      } catch (err) {
+        return payPalFailure(err);
+      }
+    },
+  );
+
+  // 7. send_rent_invoice
+  server.registerTool(
+    "send_rent_invoice",
+    {
+      title: "Send rent invoice",
+      description:
+        "Call only after the owner asks to bill a specific amount from draft_rent_invoices. Creates a PayPal invoice for that tenant and sends it. The page asks the owner to approve before this runs. Calling it again for the same amount returns the invoice already sent; it never bills a tenant twice.",
+      inputSchema: { flag_id: z.string().min(1).describe("flag_id of a bill from draft_rent_invoices") },
+      outputSchema: { flag_id: z.string(), tenant: z.string(), property_name: z.string(), unit: z.string(), already_sent: z.boolean(), invoice: invoiceShape, note: z.string() },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ flag_id }) => {
+      const bill = findBill(flag_id);
+      if (!bill) {
+        return fail("unknown_bill", `Nothing to bill for "${flag_id}". Use one of these.`, {
+          bills: collectibleBills().map((b) => ({ flag_id: b.flag_id, tenant: b.tenant, amount: b.amount })),
+        });
+      }
+      if (!paypal.configured) return fail("paypal_not_connected", "PayPal is not connected on this server, so no invoice was sent.");
+      try {
+        const { already_sent, ...inv } = await paypal.send(bill);
+        return ok({ flag_id, tenant: bill.tenant, property_name: bill.property_name, unit: bill.unit, already_sent, invoice: strip(inv), note: `${DATA_NOTE} PayPal sandbox.` });
+      } catch (err) {
+        return payPalFailure(err);
+      }
+    },
+  );
+
+  // 8. rent_collection_status
+  server.registerTool(
+    "rent_collection_status",
+    {
+      title: "Rent collection status",
+      description:
+        "Call when the owner asks what was billed, what has been paid, or who still owes. Returns each amount owed with its PayPal invoice status, plus totals billed, collected and still due. Covers every property in the portfolio.",
+      inputSchema: {},
+      outputSchema: { bills: z.array(billShape), billed: z.number(), collected: z.number(), still_due: z.number(), not_yet_invoiced: z.number(), note: z.string() },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async () => {
+      if (!paypal.configured) return fail("paypal_not_connected", "PayPal is not connected on this server, so there is no invoice status to read.");
+      try {
+        const bills = await billsWithInvoices(paypal);
+        const sum = (f: (b: (typeof bills)[number]) => number) => bills.reduce((a, b) => a + f(b), 0);
+        return ok({
+          bills,
+          billed: sum((b) => b.invoice?.amount ?? 0),
+          collected: sum((b) => b.invoice?.paid ?? 0),
+          still_due: sum((b) => b.invoice?.due ?? 0),
+          not_yet_invoiced: sum((b) => (b.invoice ? 0 : b.amount)),
+          note: `${DATA_NOTE} PayPal sandbox.`,
+        });
+      } catch (err) {
+        return payPalFailure(err);
+      }
+    },
+  );
+
+  // 9. record_rent_payment
+  server.registerTool(
+    "record_rent_payment",
+    {
+      title: "Record rent payment",
+      description:
+        "Call when the owner says a tenant paid an invoiced amount outside PayPal, for example by check. Marks the PayPal invoice paid for that amount. The page asks the owner to approve before this runs.",
+      inputSchema: {
+        flag_id: z.string().min(1).describe("flag_id of a bill that has a sent invoice"),
+        amount: z.number().positive().optional().describe("Dollars received; defaults to the full amount due"),
+        method: z.enum(["CHECK", "BANK_TRANSFER", "CASH"]).optional().describe("How the tenant paid; defaults to CHECK"),
+      },
+      outputSchema: { flag_id: z.string(), tenant: z.string(), recorded: z.number(), invoice: invoiceShape, note: z.string() },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ flag_id, amount, method }) => {
+      const bill = findBill(flag_id);
+      if (!bill) return fail("unknown_bill", `Nothing was billed for "${flag_id}".`);
+      if (!paypal.configured) return fail("paypal_not_connected", "PayPal is not connected on this server, so no payment was recorded.");
+      try {
+        const inv = await paypal.invoiceFor(flag_id);
+        if (!inv) return fail("not_invoiced", `${bill.tenant} has not been sent an invoice for this amount yet. Send it first.`);
+        if (inv.due <= 0) return fail("already_paid", `${bill.tenant}'s invoice is already paid in full.`, { invoice: strip(inv) });
+        const pay = Math.min(amount ?? inv.due, inv.due);
+        const after = (await paypal.recordPayment(inv.invoice_id, pay, method ?? "CHECK")) ?? inv;
+        return ok({ flag_id, tenant: bill.tenant, recorded: pay, invoice: strip(after), note: `${DATA_NOTE} PayPal sandbox.` });
+      } catch (err) {
+        return payPalFailure(err);
+      }
+    },
+  );
+
 
   return server;
 }

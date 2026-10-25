@@ -20,15 +20,16 @@ describe("protocol", () => {
     expect(s.client.getServerVersion()?.name).toBe("ilora-building-analyst");
   });
 
-  it("lists exactly the five intent tools, each with input and output schemas", async () => {
+  it("lists exactly the nine intent tools, each with input and output schemas", async () => {
     const { tools } = await s.client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ["check_rent_roll_vs_statement", "explain_flag", "get_property_snapshot", "list_expiring_leases", "list_properties"].sort(),
+      ["check_rent_roll_vs_statement", "draft_rent_invoices", "explain_flag", "get_property_snapshot", "list_expiring_leases", "list_properties", "record_rent_payment", "rent_collection_status", "send_rent_invoice"].sort(),
     );
     for (const t of tools) {
       expect(t.outputSchema, t.name).toBeDefined();
       expect(t.description!.length, t.name).toBeGreaterThan(80);
-      expect(t.annotations?.readOnlyHint, t.name).toBe(true);
+      const writes = t.name === "send_rent_invoice" || t.name === "record_rent_payment";
+      expect(t.annotations?.readOnlyHint, t.name).toBe(!writes);
     }
   });
 

@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ILORA.ai Building Analyst</title>
-    <meta name="description" content="ILORA.ai Building Analyst: ask about a commercial property's rent roll, income statement and leases, or run a full portfolio review. Runs on NVIDIA Nemotron through Nebius Token Factory. Demo data is fictional." />
+    <title>ILORA.ai Rent Collector</title>
+    <meta name="description" content="ILORA.ai Rent Collector finds rent a small commercial property owner never billed, sends the tenant a PayPal invoice after the owner approves, and tracks what was paid. Demo data is fictional; PayPal runs in sandbox." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500&family=Tenor+Sans&display=swap" rel="stylesheet" />
@@ -14,7 +14,7 @@
     <header id="top-bar">
       <div id="brand">
         <span id="brand-name">ILORA.ai</span>
-        <span id="brand-sub">Building Analyst · NVIDIA Nemotron on Nebius</span>
+        <span id="brand-sub">Rent Collector · PayPal invoicing</span>
       </div>
       <div id="controls">
         <label class="toggle" id="screen-toggle-wrap"><input type="checkbox" id="screen-toggle" checked /> Show visuals</label>
@@ -34,8 +34,9 @@
           </div>
         </div>
         <div id="review-bar">
-          <button type="button" id="review">Review my portfolio</button>
-          <span id="review-hint">Runs every check on every property, then writes your memo.</span>
+          <button type="button" id="collect">Find rent to collect</button>
+          <button type="button" id="review" class="secondary">Review my portfolio</button>
+          <span id="review-hint">Nothing is billed until you approve it.</span>
         </div>
         <div id="ask-bar">
           <button type="button" id="talk" aria-label="Hold to talk">Hold to talk</button>
@@ -57,7 +58,7 @@
     </main>
 
     <footer id="foot">
-      <p id="foot-note">NVIDIA Nemotron chooses each check and writes the answer; every number comes from a checked tool, never from the model. All properties, tenants and figures are fictional.</p>
+      <p id="foot-note">NVIDIA Nemotron chooses each check and writes the answer; every number comes from a checked tool, never from the model. Invoices go through the PayPal sandbox only after you approve them. All properties, tenants and figures are fictional.</p>
     </footer>
     <script type="module" src="./src/main.ts"></script>
   </body>

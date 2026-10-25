@@ -4,6 +4,7 @@
  * calls the same MCP tools; only the language understanding is rule-based.
  * The simulator labels which brain answered every turn.
  */
+import { collectibleBills } from "../paypal.js";
 import type { Block, Brain, BrainRequest, Message, McpTool, ToolResultBlock } from "./types.js";
 
 const money = (n: number) => `$${Math.round(Math.abs(n)).toLocaleString("en-US")}`;
@@ -155,11 +156,13 @@ export class OfflinePlanner implements Brain {
 
     // Follow-ups that refer to an item in the previous answer.
     if (n && prev?.result && /\b(one|it|that|them|lines|about|more|show)\b/.test(t)) {
-      const list = (prev.result.causes ?? prev.result.leases) as Record<string, unknown>[] | undefined;
+      const list = (prev.result.causes ?? prev.result.leases ?? prev.result.bills) as Record<string, unknown>[] | undefined;
       if (list?.length) {
         const item = n === -1 ? list[list.length - 1] : list[n - 1];
         if (!item) return this.say(`There are only ${list.length} in that list.`);
         if (prev.name === "check_rent_roll_vs_statement" && has("explain_flag")) return this.use("explain_flag", { flag_id: item.flag_id as string });
+        if (prev.name === "draft_rent_invoices" && /\b(bill|send|invoice)\b/.test(t)) return this.use("send_rent_invoice", { flag_id: item.flag_id as string });
+        if (prev.name === "draft_rent_invoices" || prev.name === "rent_collection_status") return this.use("explain_flag", { flag_id: item.flag_id as string });
         if (prev.name === "list_expiring_leases") {
           const l = item as { label: string; expiration_date: string; days_until_expiration: number; monthly_rent: number; annual_rent: number; share_of_income_pct: number };
           return this.say(`${l.label}. The lease ends ${spokenDate(l.expiration_date)}, ${l.days_until_expiration} days after the latest rent roll. Rent is ${money(l.monthly_rent)} a month, ${money(l.annual_rent)} a year, ${l.share_of_income_pct}% of rent roll income.`);
@@ -170,6 +173,18 @@ export class OfflinePlanner implements Brain {
       const first = (prev.result?.causes as { flag_id: string }[] | undefined)?.[0];
       if (first) return this.use("explain_flag", { flag_id: first.flag_id });
     }
+
+    // Rent collection.
+    const bill = collectibleBills().find((b) => t.includes(b.tenant.toLowerCase().split(" ")[0]));
+    if (/\b(paid|payment|check came|received)\b/.test(t) && bill && has("record_rent_payment")) {
+      const amount = t.match(/\$?\s*([\d,]+(?:\.\d\d)?)\b/);
+      const method = /\bcash\b/.test(t) ? "CASH" : /\b(transfer|wire|ach)\b/.test(t) ? "BANK_TRANSFER" : "CHECK";
+      const n = amount ? Number(amount[1].replace(/,/g, "")) : 0;
+      return this.use("record_rent_payment", n >= 1 ? { flag_id: bill.flag_id, amount: n, method } : { flag_id: bill.flag_id, method });
+    }
+    if (/\b(still owe|who owes|owes me|outstanding|been paid|collected)\b/.test(t) && has("rent_collection_status")) return this.use("rent_collection_status", {});
+    if (/\b(bill|invoice|send)\b/.test(t) && bill && has("send_rent_invoice")) return this.use("send_rent_invoice", { flag_id: bill.flag_id });
+    if (/\b(bill|invoice|collect)\b/.test(t) && has("draft_rent_invoices")) return this.use("draft_rent_invoices", {});
 
     if (/\b(what|which) (properties|buildings)|\bmy properties\b|\blist (my )?properties\b/.test(t)) return this.use("list_properties", {});
     if (!prop) return this.use("list_properties", {});
@@ -215,6 +230,8 @@ export class OfflinePlanner implements Brain {
     if (call.isError) {
       const e = (r.error ?? {}) as { code?: string; did_you_mean?: { name: string }[] };
       if (e.code === "unknown_property") return `I couldn't find that property. Did you mean ${(e.did_you_mean ?? []).map((p) => p.name).join(" or ")}?`;
+      if (e.code === "owner_declined") return "Okay. Nothing was sent.";
+      if (e.code && ["paypal_not_connected", "not_invoiced", "already_paid", "paypal_error", "paypal_unreachable"].includes(e.code)) return String((e as { message?: string }).message ?? "PayPal did not complete that.");
       return "I couldn't find that item. Want me to run the check again?";
     }
     switch (call.name) {
@@ -249,6 +266,27 @@ export class OfflinePlanner implements Brain {
         // Prefer a dated statement line (where the money actually posted), then any line, then the document.
         const s = f.sources.find((x) => x.period) ?? f.sources.find((x) => x.line) ?? f.sources[0];
         return `${f.reason} The first line is on page ${s.page}${s.line ? `, line ${s.line}` : ""} of the ${s.document}. ${f.suggested_fix}`;
+      }
+      case "draft_rent_invoices": {
+        const d = r as { total_owed: number; not_yet_invoiced: number; bills: { tenant: string; amount: number; line_item: string; property_name: string; invoice: { status: string } | null }[] };
+        if (!d.bills.length) return "No tenant owes rent that was not billed.";
+        const lines = d.bills.map((b, i) => `${["First", "Second", "Third"][i] ?? `Number ${i + 1}`}, ${b.tenant} at ${b.property_name}, ${money(b.amount)}: ${b.line_item.toLowerCase()}${b.invoice ? `, already invoiced (${b.invoice.status.toLowerCase().replace(/_/g, " ")})` : ""}.`);
+        return `You can bill ${money(d.total_owed)} to ${d.bills.length} ${d.bills.length === 1 ? "tenant" : "tenants"}. ${lines.join(" ")}${d.not_yet_invoiced ? " Want me to send the first invoice?" : ""}`;
+      }
+      case "send_rent_invoice": {
+        const x = r as { tenant: string; already_sent: boolean; invoice: { amount: number; status: string } };
+        return x.already_sent
+          ? `${x.tenant} already has a PayPal invoice for ${money(x.invoice.amount)}, so I did not send another. Its status is ${x.invoice.status.toLowerCase().replace(/_/g, " ")}.`
+          : `Sent. ${x.tenant} has a PayPal invoice for ${money(x.invoice.amount)}, due in 10 days.`;
+      }
+      case "rent_collection_status": {
+        const c = r as { billed: number; collected: number; still_due: number; not_yet_invoiced: number; bills: { tenant: string; invoice: { due: number; status: string } | null }[] };
+        const owing = c.bills.filter((b) => b.invoice && b.invoice.due > 0).map((b) => `${b.tenant} owes ${money(b.invoice!.due)}`);
+        return `You have billed ${money(c.billed)} and collected ${money(c.collected)}, so ${money(c.still_due)} is still due.${owing.length ? ` ${owing.join("; ")}.` : ""}${c.not_yet_invoiced ? ` ${money(c.not_yet_invoiced)} has not been invoiced yet.` : ""}`;
+      }
+      case "record_rent_payment": {
+        const x = r as { tenant: string; recorded: number; invoice: { due: number } };
+        return `Recorded ${money(x.recorded)} from ${x.tenant}. ${x.invoice.due > 0 ? `${money(x.invoice.due)} is still due.` : "The invoice is paid in full."}`;
       }
       default:
         return "Done.";
