@@ -1,8 +1,8 @@
 {
-  "name": "ilora-building-analyst",
+  "name": "ilora-rent-collector",
   "version": "0.1.0",
   "private": true,
-  "description": "ILORA.ai Building Analyst: NVIDIA Nemotron on Nebius Token Factory reviews a small commercial real estate portfolio through an MCP server and reports which figures don't add up, with sources.",
+  "description": "ILORA.ai Rent Collector: finds rent a small commercial property owner never billed, sends the tenant a PayPal invoice after the owner approves, and tracks what was paid. NVIDIA Nemotron chooses the steps through an MCP server; every number comes from a tool.",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -15,7 +15,8 @@
     "build:lambda": "npm run build:sim && node scripts/build-lambda.mjs",
     "data": "tsx scripts/generate-demo-data.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "sandbox:reset": "tsx scripts/reset-sandbox.ts"
   },
   "dependencies": {
     "@aws-sdk/client-polly": "3.1152.0",

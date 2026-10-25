@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: ILORA.ai Building Analyst - MCP server (Streamable HTTP) and analyst page on AWS Lambda; NVIDIA Nemotron runs on Nebius Token Factory.
+Description: ILORA.ai Rent Collector - MCP server (Streamable HTTP) and page on AWS Lambda; NVIDIA Nemotron on Nebius Token Factory picks the steps and PayPal Invoicing (sandbox) bills the tenants.
 
 Parameters:
   Brain:
@@ -13,6 +13,16 @@ Parameters:
     NoEcho: true
     Default: ""
     Description: 'Nebius Token Factory API key, needed when Brain is nemotron.'
+  PayPalClientId:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: 'PayPal REST app client id (sandbox). Without it the invoice tools say PayPal is not connected.'
+  PayPalClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: 'PayPal REST app secret (sandbox).'
   Voice:
     Type: String
     Default: polly
@@ -41,6 +51,8 @@ Resources:
           SIMULATOR_DIR: /var/task/simulator
           BRAIN: !Ref Brain
           NEBIUS_API_KEY: !Ref NebiusApiKey
+          PAYPAL_CLIENT_ID: !Ref PayPalClientId
+          PAYPAL_CLIENT_SECRET: !Ref PayPalClientSecret
           VOICE: !Ref Voice
           POLLY_ENGINE: generative
           POLLY_VOICE: Ruth
@@ -60,5 +72,5 @@ Outputs:
     Description: MCP Streamable HTTP endpoint
     Value: !Sub "${McpFunctionUrl.FunctionUrl}mcp"
   AnalystUrl:
-    Description: ILORA.ai Building Analyst page
+    Description: ILORA.ai Rent Collector page
     Value: !GetAtt McpFunctionUrl.FunctionUrl

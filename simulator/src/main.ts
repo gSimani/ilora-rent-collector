@@ -1,5 +1,5 @@
 /**
- * ILORA.ai Building Analyst page.
+ * ILORA.ai Rent Collector page.
  *
  * This page is a real MCP client: it connects to the ILORA.ai server over
  * Streamable HTTP and runs initialize, tools/list, tools/call and resources/read
@@ -20,11 +20,11 @@ type BrainReply =
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const MCP_URL = new URL("/mcp", location.href);
 const SUGGESTIONS = [
-  "How is Coral Wren Plaza doing?",
-  "Does my rent roll match my income statement for Coral Wren Plaza?",
-  "Show me the lines.",
-  "Which leases expire in the next 90 days at Tamarind Grove?",
-  "Tell me about the second one.",
+  "What rent can I bill right now?",
+  "Bill Harbor Light Pilates for the rent increase.",
+  "Who still owes me?",
+  "Harbor Light Pilates paid by check.",
+  "Show me the lines for the first one.",
 ];
 
 // ------------------------------------------------------------------ JSON-RPC wire log
@@ -104,6 +104,68 @@ function payloadOf(r: CallToolResult): unknown {
   }
 }
 
+// ------------------------------------------------------------------ owner approval
+
+type KnownBill = { tenant: string; property_name: string; unit: string; amount: number; line_item: string };
+/** What each bill is, learned from the last draft or status result, so the approval card can say it plainly. */
+const known = new Map<string, KnownBill>();
+function remember(result: CallToolResult) {
+  const bills = (result.structuredContent as { bills?: (KnownBill & { flag_id: string })[] } | undefined)?.bills;
+  for (const b of bills ?? []) known.set(b.flag_id, b);
+}
+
+const money = (n: number) => `$${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+
+/** A tool that is not read-only changes something outside this page, so the owner approves it first. */
+const needsApproval = (name: string) => tools.find((t) => t.name === name)?.annotations?.readOnlyHint !== true;
+
+async function approve(name: string, input: Record<string, unknown>): Promise<boolean> {
+  const id = String(input.flag_id ?? "");
+  if (!known.has(id)) remember((await client.callTool({ name: "draft_rent_invoices", arguments: {} })) as CallToolResult);
+  const b = known.get(id);
+  const how = String(input.method ?? "check").toLowerCase().replace("_", " ");
+  const what =
+    name === "send_rent_invoice"
+      ? b ? `Send ${b.tenant} a PayPal invoice for ${money(b.amount)}: ${b.line_item}, ${b.property_name} ${b.unit}.` : "Send a PayPal invoice."
+      : b ? `Record ${input.amount ? money(Number(input.amount)) : "the full amount due"} received from ${b.tenant} by ${how}.` : "Record a payment.";
+
+  const card = document.createElement("div");
+  card.className = "approval";
+  card.id = `approval-${Date.now()}`;
+  card.setAttribute("role", "group");
+  card.setAttribute("aria-label", "Approve this action");
+  const p = document.createElement("p");
+  p.textContent = what;
+  const note = document.createElement("p");
+  note.className = "approval-note";
+  note.textContent = "PayPal sandbox. Nothing happens until you approve.";
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.className = "approve";
+  yes.textContent = name === "send_rent_invoice" ? "Approve and send" : "Approve and record";
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "decline";
+  no.textContent = "Cancel";
+  const row = document.createElement("div");
+  row.className = "approval-actions";
+  row.id = `${card.id}-actions`;
+  row.append(yes, no);
+  card.append(p, note, row);
+  $("conversation").append(card);
+  card.scrollIntoView({ block: "end" });
+  yes.focus();
+  const ok = await new Promise<boolean>((resolve) => {
+    yes.onclick = () => resolve(true);
+    no.onclick = () => resolve(false);
+  });
+  const done = document.createElement("span");
+  done.className = "approval-note";
+  done.textContent = ok ? "Approved." : "Cancelled. Nothing was sent.";
+  row.replaceChildren(done);
+  return ok;
+}
+
 let busy = false;
 async function ask(text: string, mode: "ask" | "review" = "ask") {
   if (busy || !text.trim()) return;
@@ -131,14 +193,23 @@ async function ask(text: string, mode: "ask" | "review" = "ask") {
         speak(reply.text);
         return;
       }
+      if (needsApproval(reply.toolUse.name) && !(await approve(reply.toolUse.name, reply.toolUse.input))) {
+        used.push(`${reply.toolUse.name} declined`);
+        thread.push({
+          role: "user",
+          content: [{ toolResult: { toolUseId: reply.toolUse.toolUseId, status: "error", content: [{ json: { error: { code: "owner_declined", message: "The owner did not approve this. Nothing was sent or recorded." } } }] } }],
+        });
+        continue;
+      }
       const t0 = performance.now();
       const result = (await client.callTool({ name: reply.toolUse.name, arguments: reply.toolUse.input })) as CallToolResult;
+      remember(result);
       used.push(`${reply.toolUse.name} ${Math.round(performance.now() - t0)} ms`);
       thread.push({
         role: "user",
         content: [{ toolResult: { toolUseId: reply.toolUse.toolUseId, status: result.isError ? "error" : "success", content: [{ json: payloadOf(result) }] } }],
       });
-      if (!result.isError) await showVisual(reply.toolUse.name, result);
+      if (!result.isError && !updateLedger(reply.toolUse.name, result)) await showVisual(reply.toolUse.name, result);
     }
     addTurn("error", "I couldn't finish that. Try asking again.");
   } catch (err) {
@@ -147,6 +218,71 @@ async function ask(text: string, mode: "ask" | "review" = "ask") {
     busy = false;
     $("talk").removeAttribute("disabled");
   }
+}
+
+
+// ------------------------------------------------------------------ collection ledger
+
+type LedgerBill = KnownBill & { flag_id: string; invoice?: { status: string; amount: number; paid: number; due: number; tenant_link?: string } | null };
+let ledgerRows: LedgerBill[] = [];
+const STATUS: Record<string, string> = { SENT: "Invoice sent", UNPAID: "Invoice sent", PARTIALLY_PAID: "Part paid", PAID: "Paid", MARKED_AS_PAID: "Paid", DRAFT: "Draft" };
+
+/** Keeps the right-hand panel in step with every PayPal tool result: what is owed, what was billed, what came in. */
+function updateLedger(name: string, result: CallToolResult) {
+  const sc = result.structuredContent as Record<string, unknown> | undefined;
+  if (!sc) return false;
+  if (name === "draft_rent_invoices" || name === "rent_collection_status") ledgerRows = (sc.bills as LedgerBill[]) ?? [];
+  else if (name === "send_rent_invoice" || name === "record_rent_payment") {
+    const row = ledgerRows.find((r) => r.flag_id === sc.flag_id);
+    if (row) row.invoice = sc.invoice as LedgerBill["invoice"];
+  } else return false;
+  renderLedger();
+  return true;
+}
+
+function renderLedger() {
+  const owed = ledgerRows.reduce((a, r) => a + r.amount, 0);
+  const paid = ledgerRows.reduce((a, r) => a + (r.invoice?.paid ?? 0), 0);
+  const wrap = document.createElement("div");
+  wrap.id = "ledger";
+  const head = document.createElement("div");
+  head.id = "ledger-head";
+  head.innerHTML = '<p class="ledger-kicker">Rent to collect</p><p class="ledger-total"></p><p class="ledger-sub"></p>';
+  head.querySelector(".ledger-total")!.textContent = money(owed);
+  head.querySelector(".ledger-sub")!.textContent = `${money(paid)} collected · ${money(owed - paid)} to go`;
+  const bar = document.createElement("div");
+  bar.id = "ledger-bar";
+  bar.setAttribute("role", "img");
+  bar.setAttribute("aria-label", `${money(paid)} of ${money(owed)} collected`);
+  const fill = document.createElement("span");
+  fill.style.width = `${owed ? Math.round((paid / owed) * 100) : 0}%`;
+  bar.append(fill);
+  const list = document.createElement("ol");
+  list.id = "ledger-rows";
+  for (const r of ledgerRows) {
+    const li = document.createElement("li");
+    const status = r.invoice ? (STATUS[r.invoice.status] ?? r.invoice.status.toLowerCase()) : "Not billed";
+    li.innerHTML = '<div class="row-main"><span class="row-tenant"></span><span class="row-amount"></span></div><div class="row-sub"><span class="row-where"></span><span class="row-status"></span></div>';
+    li.querySelector(".row-tenant")!.textContent = r.tenant;
+    li.querySelector(".row-amount")!.textContent = money(r.amount);
+    li.querySelector(".row-where")!.textContent = `${r.property_name}, ${r.unit} · ${r.line_item}`;
+    const st = li.querySelector(".row-status") as HTMLElement;
+    st.textContent = status;
+    st.dataset.state = r.invoice ? (r.invoice.due <= 0 ? "paid" : "sent") : "open";
+    if (r.invoice?.tenant_link) {
+      const a = document.createElement("a");
+      a.href = r.invoice.tenant_link;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = "Tenant's PayPal invoice";
+      li.append(a);
+    }
+    list.append(li);
+  }
+  wrap.append(head, bar, list);
+  frameCleanup?.();
+  currentFrame = undefined;
+  $("visual").replaceChildren(wrap);
 }
 
 // ------------------------------------------------------------------ MCP Apps host (inline Card / List)
@@ -319,6 +455,7 @@ function setup() {
     $("suggestions").append(b);
   }
   $("review").addEventListener("click", () => ask("Review my whole portfolio and tell me what to act on first.", "review"));
+  $("collect").addEventListener("click", () => ask("What rent can I bill right now?"));
   $<HTMLFormElement>("type-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const input = $<HTMLInputElement>("typed");
