@@ -121,8 +121,14 @@ const needsApproval = (name: string) => tools.find((t) => t.name === name)?.anno
 
 async function approve(name: string, input: Record<string, unknown>): Promise<boolean> {
   const id = String(input.flag_id ?? "");
-  if (!known.has(id)) remember((await client.callTool({ name: "draft_rent_invoices", arguments: {} })) as CallToolResult);
-  const b = known.get(id);
+  // The model may pass the bill's id or just the tenant's name.
+  const lookup = () => known.get(id) ?? [...known.values()].find((k) => id.toLowerCase().includes(k.tenant.toLowerCase().split(" ")[0]));
+  if (!lookup()) {
+    const draft = (await client.callTool({ name: "draft_rent_invoices", arguments: {} })) as CallToolResult;
+    remember(draft);
+    updateLedger("draft_rent_invoices", draft);
+  }
+  const b = lookup();
   const how = String(input.method ?? "check").toLowerCase().replace("_", " ");
   const what =
     name === "send_rent_invoice"
@@ -197,7 +203,7 @@ async function ask(text: string, mode: "ask" | "review" = "ask") {
         used.push(`${reply.toolUse.name} declined`);
         thread.push({
           role: "user",
-          content: [{ toolResult: { toolUseId: reply.toolUse.toolUseId, status: "error", content: [{ json: { error: { code: "owner_declined", message: "The owner did not approve this. Nothing was sent or recorded." } } }] } }],
+          content: [{ toolResult: { toolUseId: reply.toolUse.toolUseId, status: "error", content: [{ json: { error: { code: "owner_declined", message: "The person you are talking to clicked Cancel. Tell them, speaking to them as you, that nothing was sent or recorded." } } }] } }],
         });
         continue;
       }

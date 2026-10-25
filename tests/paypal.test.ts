@@ -144,6 +144,16 @@ describe("the PayPal tools over MCP", () => {
     expect(errorOf(done).code).toBe("already_paid");
   });
 
+  it("bills and records by the tenant's name, not only by id", async () => {
+    const client = await connect(fakePayPal().pp);
+    const sent = sc(await client.callTool({ name: "send_rent_invoice", arguments: { flag_id: "Jaramillo household" } }));
+    expect(sent).toMatchObject({ flag_id: "tamarind-grove:occupied_no_rent:B-12", tenant: "Jaramillo household", already_sent: false });
+    const early = await client.callTool({ name: "record_rent_payment", arguments: { flag_id: "Harbor Light" } });
+    expect(errorOf(early).code).toBe("not_invoiced"); // resolved by name, but no invoice was sent yet
+    expect(findBill("Suite 104")?.tenant).toBe("Harbor Light Pilates");
+    expect(findBill("someone else")).toBeUndefined();
+  });
+
   it("will not record a payment before an invoice exists", async () => {
     const client = await connect(fakePayPal().pp);
     const r = await client.callTool({ name: "record_rent_payment", arguments: { flag_id: "tamarind-grove:occupied_no_rent:B-12" } });
